@@ -1,1 +1,3 @@
-
+[runner]
+# Ganti versi Python ke 3.10 atau 3.9, yang lebih stabil untuk Mediapipe
+python_version = "3.10"
