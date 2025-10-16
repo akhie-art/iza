@@ -1,5 +1,5 @@
 streamlit==1.50.0
-opencv-python==4.9.0.80
-mediapipe==0.10.14
-gTTS
-numpy
+opencv-python-headless==4.9.0.80
+mediapipe-silicon==0.10.15
+numpy==1.26.4
+gTTS==2.5.3
