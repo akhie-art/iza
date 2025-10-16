@@ -1,5 +1,5 @@
-streamlit
-opencv-python
-mediapipe
+streamlit==1.50.0
+opencv-python==4.9.0.80
+mediapipe==0.10.14
 gTTS
 numpy
