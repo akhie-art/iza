@@ -1,90 +1,53 @@
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
-import av
 import cv2
+import numpy as np
 from ultralytics import YOLO
 from gtts import gTTS
 from io import BytesIO
-import time
+import tempfile
 
-# ========================
-# Konfigurasi Streamlit
-# ========================
-st.set_page_config(page_title="👋 Deteksi Tangan Iza Cantik", layout="wide")
-st.title("👋 Deteksi Tangan - Iza Cantik (YOLO Streamlit Cloud)")
-st.caption("Arahkan tangan Anda ke kamera untuk deteksi otomatis.")
+st.set_page_config(page_title="👋 Deteksi Kamera Streamlit", layout="centered")
+st.title("👋 Deteksi Kamera (Tanpa Error Build)")
 
-# ========================
-# Load model YOLO
-# ========================
-try:
-    model = YOLO("yolov8n.pt")  # Model ringan bawaan YOLO
-except Exception as e:
-    st.error(f"❌ Gagal memuat model YOLO: {e}")
-    model = None
+# Load model YOLO default
+model = YOLO("yolov8n.pt")
 
-# ========================
-# Fungsi bicara
-# ========================
-def speak(text):
-    tts = gTTS(text=text, lang='id')
-    buf = BytesIO()
-    tts.write_to_fp(buf)
-    buf.seek(0)
-    return buf.read()
+# Pilih sumber kamera
+st.sidebar.header("📷 Pilihan Kamera")
+source = st.sidebar.selectbox("Pilih sumber video:", ["Upload file", "Gunakan kamera"])
 
-# ========================
-# Kelas Video Processor
-# ========================
-class YOLOProcessor(VideoProcessorBase):
-    def __init__(self):
-        self.last_wave_time = 0
-        self.cooldown = 3
-        self.audio_data = None
+# Jika upload video
+if source == "Upload file":
+    file = st.file_uploader("Upload video", type=["mp4", "mov", "avi"])
+    if file:
+        tfile = tempfile.NamedTemporaryFile(delete=False)
+        tfile.write(file.read())
+        cap = cv2.VideoCapture(tfile.name)
 
-    def recv(self, frame):
-        img = frame.to_ndarray(format="bgr24")
-        img = cv2.flip(img, 1)
-        status = "Mendeteksi..."
-        color = (128, 128, 128)
+        stframe = st.empty()
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame = cv2.resize(frame, (640, 480))
+            results = model(frame, verbose=False)
+            annotated = results[0].plot()
+            stframe.image(annotated, channels="BGR")
+        cap.release()
 
-        if model:
-            results = model.predict(source=img, conf=0.5, verbose=False)
-            boxes = results[0].boxes
+# Jika pakai kamera
+elif source == "Gunakan kamera":
+    st.write("Klik tombol di bawah untuk membuka kamera:")
+    run = st.checkbox("Mulai Kamera")
+    FRAME_WINDOW = st.image([])
+    cap = cv2.VideoCapture(0)
 
-            for box in boxes:
-                cls = int(box.cls[0])
-                if model.names[cls] in ["person"]:  # YOLO default tidak ada 'hand', pakai 'person' simulasi
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 3)
-                    status = "👋 Objek Terdeteksi!"
-                    color = (0, 255, 0)
-
-                    if time.time() - self.last_wave_time > self.cooldown:
-                        self.last_wave_time = time.time()
-                        self.audio_data = speak("Halo, saya Iza Cantik!")
-
-        cv2.putText(img, status, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
-
-# ========================
-# Konfigurasi WebRTC
-# ========================
-RTC_CONFIGURATION = RTCConfiguration({
-    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
-})
-
-ctx = webrtc_streamer(
-    key="iza-yolo",
-    mode="recvonly",
-    rtc_configuration=RTC_CONFIGURATION,
-    video_processor_factory=YOLOProcessor,
-    media_stream_constraints={"video": True, "audio": False},
-)
-
-# ========================
-# Putar suara jika deteksi
-# ========================
-if ctx.video_processor and ctx.video_processor.audio_data:
-    st.audio(ctx.video_processor.audio_data, format="audio/mp3")
-    ctx.video_processor.audio_data = None
+    while run:
+        ret, frame = cap.read()
+        if not ret:
+            st.warning("Tidak bisa membuka kamera!")
+            break
+        results = model(frame, verbose=False)
+        annotated = results[0].plot()
+        FRAME_WINDOW.image(annotated, channels="BGR")
+    cap.release()
