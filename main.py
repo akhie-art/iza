@@ -2,26 +2,12 @@ import streamlit as st
 import numpy as np
 from PIL import Image
 import tempfile
+from ultralytics import YOLO
 
-# Import cv2 dengan error handling
-try:
-    import cv2
-except ImportError as e:
-    st.error(f"Error importing cv2: {e}")
-    st.info("Pastikan packages.txt sudah ada dan app sudah di-reboot")
-    st.stop()
+st.set_page_config(page_title="👁 Deteksi Objek YOLO", layout="centered")
+st.title("👁 Deteksi Objek dengan YOLO")
 
-# Import YOLO dengan error handling
-try:
-    from ultralytics import YOLO
-except ImportError as e:
-    st.error(f"Error importing YOLO: {e}")
-    st.stop()
-
-st.set_page_config(page_title="👁 Deteksi Kamera Streamlit", layout="centered")
-st.title("👁 Deteksi Kamera (Fixed Build)")
-
-# Load model YOLO default
+# Load model YOLO dengan cache
 @st.cache_resource
 def load_model():
     return YOLO("yolov8n.pt")
@@ -30,52 +16,77 @@ try:
     model = load_model()
     st.success("✅ Model YOLO berhasil dimuat!")
 except Exception as e:
-    st.error(f"Error loading model: {e}")
+    st.error(f"❌ Error loading model: {e}")
     st.stop()
 
-# Pilih sumber kamera
-st.sidebar.header("📷 Pilihan Kamera")
-source = st.sidebar.selectbox("Pilih sumber video:", ["Upload file", "Gunakan kamera"])
+# Sidebar
+st.sidebar.header("📷 Upload Gambar/Video")
+st.sidebar.info("Upload gambar untuk deteksi objek")
 
-# Jika upload video
-if source == "Upload file":
-    file = st.file_uploader("Upload video", type=["mp4", "mov", "avi"])
-    if file:
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tfile:
-            tfile.write(file.read())
-            video_path = tfile.name
-        
-        cap = cv2.VideoCapture(video_path)
-        stframe = st.empty()
-        
-        st.info("🎬 Memproses video...")
-        frame_count = 0
-        
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
-            frame_count += 1
-            # Proses setiap 3 frame untuk performa lebih baik
-            if frame_count % 3 == 0:
-                frame = cv2.resize(frame, (640, 480))
-                results = model(frame, verbose=False)
-                annotated = results[0].plot()
-                annotated_rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
-                stframe.image(annotated_rgb, use_container_width=True)
-        
-        cap.release()
-        st.success("✅ Video selesai diproses!")
+# Upload file
+uploaded_file = st.file_uploader(
+    "Pilih gambar untuk deteksi objek", 
+    type=["jpg", "jpeg", "png", "bmp", "webp"]
+)
 
-# Jika pakai kamera
-elif source == "Gunakan kamera":
-    st.warning("⚠️ Fitur kamera real-time tidak didukung di Streamlit Cloud")
-    st.info("💡 Gunakan fitur 'Upload file' untuk mendeteksi objek dari video yang sudah direkam")
+if uploaded_file is not None:
+    # Baca gambar menggunakan PIL
+    image = Image.open(uploaded_file)
     
+    # Tampilkan gambar asli
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("📸 Gambar Asli")
+        st.image(image, use_container_width=True)
+    
+    # Proses deteksi
+    with st.spinner("🔍 Mendeteksi objek..."):
+        # Konversi PIL ke numpy array untuk YOLO
+        img_array = np.array(image)
+        
+        # Jalankan prediksi
+        results = model(img_array, verbose=False)
+        
+        # Dapatkan gambar hasil deteksi
+        annotated_img = results[0].plot()
+        
+        # Konversi BGR ke RGB (YOLO output dalam BGR)
+        annotated_img_rgb = annotated_img[:, :, ::-1]
+        
+    with col2:
+        st.subheader("🎯 Hasil Deteksi")
+        st.image(annotated_img_rgb, use_container_width=True)
+    
+    # Tampilkan detail deteksi
+    st.subheader("📊 Detail Deteksi")
+    
+    boxes = results[0].boxes
+    if len(boxes) > 0:
+        detections = []
+        for box in boxes:
+            class_id = int(box.cls[0])
+            confidence = float(box.conf[0])
+            class_name = model.names[class_id]
+            detections.append({
+                "Objek": class_name,
+                "Confidence": f"{confidence:.2%}"
+            })
+        
+        st.table(detections)
+        st.success(f"✅ Terdeteksi {len(boxes)} objek!")
+    else:
+        st.warning("⚠️ Tidak ada objek yang terdeteksi")
+
+else:
+    st.info("👆 Upload gambar untuk memulai deteksi objek")
+    
+    # Contoh gambar
+    st.markdown("---")
+    st.subheader("💡 Tips:")
     st.markdown("""
-    ### Alternatif:
-    1. Rekam video menggunakan kamera HP/laptop
-    2. Upload video tersebut menggunakan opsi 'Upload file'
-    3. Sistem akan mendeteksi objek dari video yang diupload
+    - Upload gambar dengan format: JPG, PNG, JPEG, BMP, atau WebP
+    - Model dapat mendeteksi 80 jenis objek (orang, mobil, hewan, dll)
+    - Semakin jelas gambar, semakin akurat deteksinya
+    - Ukuran file maksimal: 200MB
     """)
