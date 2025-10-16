@@ -1,219 +1,127 @@
 import streamlit as st
-import time
-import os
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+import av
+import cv2
+import mediapipe as mp
 import numpy as np
-from io import BytesIO
+import time
 from gtts import gTTS
-import sys
+from io import BytesIO
 
-# ====================================================
-# 🔍 DETEKSI ENVIRONMENT (Cloud vs Lokal)
-# ====================================================
-IS_CLOUD = "streamlit" in os.getcwd().lower() or "mount/src" in os.getcwd().lower()
-st.write(f"🌐 Mode: {'CLOUD (Simulasi)' if IS_CLOUD else 'LOKAL (Deteksi Asli)'}")
+# ======================== KONFIGURASI STREAMLIT ========================
+st.set_page_config(page_title="👋 Iza Cantik - Deteksi Lambaian Tangan", layout="wide")
+st.title("👋 Deteksi Lambaian Tangan - Iza Cantik (Realtime)")
 
-# ====================================================
-# 🧩 IMPORT LIBRARY OPENCV & MEDIAPIPE (opsional)
-# ====================================================
-try:
-    import cv2
-    import mediapipe as mp
-    HAS_CV2 = True
-    HAS_MEDIAPIPE = True
-except ImportError:
-    st.warning("⚠️ Tidak menemukan OpenCV / Mediapipe. Mengaktifkan mode simulasi.")
-    import types
-    HAS_CV2 = False
-    HAS_MEDIAPIPE = False
-    cv2 = types.SimpleNamespace(
-        flip=lambda x, y: x,
-        cvtColor=lambda x, y: x,
-        COLOR_BGR2RGB=None,
-        putText=lambda *a, **k: None,
-        FONT_HERSHEY_SIMPLEX=0,
-        LINE_AA=0
-    )
-    mp = types.SimpleNamespace(solutions=types.SimpleNamespace(hands=None, drawing_utils=None))
+# ======================== KONFIGURASI MEDIAPIPE ========================
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
+mp_drawing_styles = mp.solutions.drawing_styles
 
-# ====================================================
-# 🧠 INISIALISASI SESSION STATE
-# ====================================================
-defaults = {
-    'last_wave_time': 0.0,
-    'prev_positions': [],
-    'direction_changes': 0,
-    'last_direction': None,
-    'wave_detected': False,
-    'audio_data': None
-}
-for k, v in defaults.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
-
-# ====================================================
-# ✋ INISIALISASI MEDIAPIPE
-# ====================================================
-@st.cache_resource
-def get_mediapipe_hands():
-    if not HAS_MEDIAPIPE:
-        return None, None, None, None
-    mp_hands = mp.solutions.hands
-    hands = mp_hands.Hands(
-        static_image_mode=False,
-        max_num_hands=1,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5
-    )
-    return mp_hands, hands, mp_hands.DrawingSpec, mp.solutions.drawing_utils
-
-mp_hands, hands, DrawingSpec, mp_drawing = get_mediapipe_hands()
-
-# ====================================================
-# ⚙️ KONSTANTA
-# ====================================================
+# ======================== KONSTANTA LOGIKA ========================
 WAVE_MOVEMENT_THRESHOLD = 0.15
 WAVE_COOLDOWN_TIME = 3.0
 POSITION_HISTORY_SIZE = 10
 MIN_DIRECTION_CHANGES = 2
 
-# ====================================================
-# 🔊 FUNGSI SUARA
-# ====================================================
+# ======================== FUNGSI BICARA ========================
 def speak(text):
-    try:
-        tts = gTTS(text=text, lang='id')
-        mp3_fp = BytesIO()
-        tts.write_to_fp(mp3_fp)
-        mp3_fp.seek(0)
-        st.session_state.audio_data = mp3_fp.read()
-    except Exception as e:
-        st.error(f"❌ Gagal membuat suara: {e}")
-        st.session_state.audio_data = None
+    tts = gTTS(text=text, lang='id')
+    fp = BytesIO()
+    tts.write_to_fp(fp)
+    fp.seek(0)
+    return fp.read()
 
-# ====================================================
-# 👋 FUNGSI DETEKSI LAMBAIAN
-# ====================================================
-def detect_wave(frame):
-    """Deteksi lambaian tangan atau simulasi jika library tidak tersedia"""
-    # MODE SIMULASI (Cloud tanpa cv2/mediapipe)
-    if IS_CLOUD or not HAS_CV2 or not HAS_MEDIAPIPE or hands is None:
-        cv2.putText(frame, "Simulasi: Lambaian Terdeteksi",
-                    (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 0), 3)
-        speak("Halo, saya Iza Cantik! Mode simulasi aktif.")
-        return frame, True
-
-    # MODE LOKAL (dengan OpenCV + Mediapipe)
-    frame = cv2.flip(frame, 1)
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    rgb.flags.writeable = False
-    result = hands.process(rgb)
-    rgb.flags.writeable = True
-
-    status_text = "Menunggu Tangan"
-    status_color = (128, 128, 128)
-    wave_detected_now = False
-
-    prev_positions = st.session_state.prev_positions
-    direction_changes = st.session_state.direction_changes
-    last_direction = st.session_state.last_direction
-    wave_detected = st.session_state.wave_detected
-    last_wave_time = st.session_state.last_wave_time
-
-    if result.multi_hand_landmarks:
-        hand_landmarks = result.multi_hand_landmarks[0]
-        mp_drawing.draw_landmarks(
-            frame, hand_landmarks, mp_hands.HAND_CONNECTIONS,
-            DrawingSpec(color=(0, 0, 255), thickness=2, circle_radius=3),
-            DrawingSpec(color=(0, 255, 0), thickness=2)
+# ======================== VIDEO PROCESSOR ========================
+class HandWaveProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.hands = mp_hands.Hands(
+            static_image_mode=False,
+            max_num_hands=1,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
         )
+        self.prev_positions = []
+        self.direction_changes = 0
+        self.last_direction = None
+        self.last_wave_time = 0.0
+        self.wave_detected = False
+        self.audio_data = None
 
-        wrist_x = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST].x
-        prev_positions.append(wrist_x)
-        if len(prev_positions) > POSITION_HISTORY_SIZE:
-            prev_positions.pop(0)
+    def detect_wave(self, wrist_x):
+        self.prev_positions.append(wrist_x)
+        if len(self.prev_positions) > POSITION_HISTORY_SIZE:
+            self.prev_positions.pop(0)
 
-        if len(prev_positions) >= 3:
-            recent_movement = prev_positions[-1] - prev_positions[-3]
+        if len(self.prev_positions) >= 3:
+            recent_movement = self.prev_positions[-1] - self.prev_positions[-3]
             if abs(recent_movement) > 0.02:
                 current_direction = "right" if recent_movement > 0 else "left"
-                if last_direction and last_direction != current_direction:
-                    direction_changes += 1
-                last_direction = current_direction
+                if self.last_direction and self.last_direction != current_direction:
+                    self.direction_changes += 1
+                self.last_direction = current_direction
 
-        if len(prev_positions) == POSITION_HISTORY_SIZE:
-            movement = max(prev_positions) - min(prev_positions)
-            if movement > WAVE_MOVEMENT_THRESHOLD and direction_changes >= MIN_DIRECTION_CHANGES:
-                status_text = "LAMBAIAN TERDETEKSI!"
-                status_color = (0, 165, 255)
+        if len(self.prev_positions) == POSITION_HISTORY_SIZE:
+            movement = max(self.prev_positions) - min(self.prev_positions)
+            if movement > WAVE_MOVEMENT_THRESHOLD and self.direction_changes >= MIN_DIRECTION_CHANGES:
                 current_time = time.time()
-                if not wave_detected and (current_time - last_wave_time) > WAVE_COOLDOWN_TIME:
-                    wave_detected_now = True
-                    last_wave_time = current_time
-                    wave_detected = True
-                    speak("Halo, saya Iza Cantik!")
-                    prev_positions, direction_changes, last_direction = [], 0, None
-            else:
-                if movement > 0.05:
-                    status_text = "Melambai..."
+                if not self.wave_detected and (current_time - self.last_wave_time) > WAVE_COOLDOWN_TIME:
+                    self.last_wave_time = current_time
+                    self.wave_detected = True
+                    self.audio_data = speak("Halo, saya Iza Cantik!")
+                    self.prev_positions = []
+                    self.direction_changes = 0
+                    self.last_direction = None
+                    return True
+        return False
+
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        img = cv2.flip(img, 1)
+
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = self.hands.process(rgb)
+
+        status_text = "Menunggu tangan..."
+        status_color = (128, 128, 128)
+
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                mp_drawing.draw_landmarks(
+                    img,
+                    hand_landmarks,
+                    mp_hands.HAND_CONNECTIONS,
+                    mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=2, circle_radius=2),
+                    mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2)
+                )
+                wrist_x = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST].x
+                wave = self.detect_wave(wrist_x)
+                if wave:
+                    status_text = "👋 Lambaian Terdeteksi!"
+                    status_color = (0, 165, 255)
+                    print("Lambaian terdeteksi!")
+                else:
+                    status_text = "Tangan Terdeteksi"
                     status_color = (0, 255, 0)
 
-    current_time = time.time()
-    if wave_detected and (current_time - last_wave_time) > WAVE_COOLDOWN_TIME:
-        wave_detected = False
+        cv2.putText(img, status_text, (10, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, status_color, 3, cv2.LINE_AA)
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-    cv2.putText(frame, status_text, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.2,
-                status_color, 3, cv2.LINE_AA)
-    cooldown_remaining = max(0, last_wave_time + WAVE_COOLDOWN_TIME - current_time)
-    if cooldown_remaining > 0:
-        cv2.putText(frame, f"Cooldown: {cooldown_remaining:.1f}s",
-                    (10, frame.shape[0] - 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+# ======================== KONFIGURASI WEBRTC ========================
+RTC_CONFIGURATION = RTCConfiguration({
+    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+})
 
-    # Simpan kembali state
-    st.session_state.prev_positions = prev_positions
-    st.session_state.direction_changes = direction_changes
-    st.session_state.last_direction = last_direction
-    st.session_state.wave_detected = wave_detected
-    st.session_state.last_wave_time = last_wave_time
+# ======================== STREAMING ========================
+ctx = webrtc_streamer(
+    key="wave-detector",
+    mode="recvonly",
+    rtc_configuration=RTC_CONFIGURATION,
+    video_processor_factory=HandWaveProcessor,
+    media_stream_constraints={"video": True, "audio": False},
+)
 
-    return frame, wave_detected_now
-
-# ====================================================
-# 🖥️ APLIKASI STREAMLIT
-# ====================================================
-def main():
-    st.set_page_config(page_title="Iza Cantik - Deteksi Lambaian", layout="wide")
-    st.title("👋 Deteksi Lambaian Tangan - Iza Cantik")
-    st.info("Unggah gambar tangan Anda atau gunakan kamera. Jika lambaian terdeteksi, Iza akan menyapa Anda!")
-
-    # --- Upload gambar ---
-    st.header("📤 Unggah Gambar")
-    uploaded_file = st.file_uploader("Pilih gambar tangan...", type=["jpg", "jpeg", "png"])
-
-    if uploaded_file:
-        frame = cv2.imdecode(np.frombuffer(uploaded_file.read(), np.uint8), 1)
-        processed_frame, wave_detected_now = detect_wave(frame)
-        st.image(cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB),
-                 channels="RGB", caption="Hasil Deteksi")
-        if wave_detected_now and st.session_state.audio_data:
-            st.audio(st.session_state.audio_data, format="audio/mp3")
-            st.session_state.audio_data = None
-
-    st.markdown("---")
-
-    # --- Kamera ---
-    st.header("📸 Ambil Foto dari Kamera")
-    camera_image = st.camera_input("Ambil foto tangan melambai")
-
-    if camera_image:
-        frame = cv2.imdecode(np.frombuffer(camera_image.read(), np.uint8), 1)
-        processed_frame, wave_detected_now = detect_wave(frame)
-        st.image(cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB),
-                 channels="RGB", caption="Hasil Deteksi Kamera")
-        if wave_detected_now and st.session_state.audio_data:
-            st.audio(st.session_state.audio_data, format="audio/mp3")
-            st.session_state.audio_data = None
-
-
-if __name__ == "__main__":
-    main()
+# ======================== AUDIO FEEDBACK ========================
+if ctx.video_processor and ctx.video_processor.audio_data:
+    st.audio(ctx.video_processor.audio_data, format="audio/mp3")
+    ctx.video_processor.audio_data = None
